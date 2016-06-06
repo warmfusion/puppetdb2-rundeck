@@ -6,8 +6,13 @@ require 'json'
 require 'yaml'
 require 'sinatra'
 
-# Base URL of the PuppetDB database.  Do not include a trailing slash!
-HOST_URL = ENV['PUPPET_URL'] ||= 'http://puppet:8080'
+
+# Get Thee PuppetURL from an environment variable, and automatically
+# protect from people adding a slash to the end of their URL's
+puppet_url = ENV['PUPPET_URL'].chomp('/')
+
+# Base URL of the PuppetDB database; default if undefined
+HOST_URL = puppet_url ||= 'http://puppet:8080'
 # Number of seconds to cache the previous results for
 CACHE_SECONDS = ENV['CACHE_SECONDS'].to_i ||= 1800
 
@@ -63,6 +68,20 @@ class PuppetDB
     url = "#{HOST_URL}/v3/facts"
     facts = get_json(url)
   end
+
+  def nodes
+    if !@nodes_fetched_at || Time.now > @nodes_fetched_at + CACHE_SECONDS
+      #    	puts "Getting new PuppetDB nodes: #{Time.now} > #{@nodes_fetched_at} + #{CACHE_SECONDS}"
+      @nodes = get_nodes
+      @nodes_fetched_at = Time.now
+    end
+    @nodes
+  end
+
+  def get_nodes
+    url = "#{HOST_URL}/v3/nodes"
+    nodes = get_json(url)
+  end
 end
 
 class Rundeck
@@ -77,34 +96,23 @@ class Rundeck
   end
 
   def build_resources
-    resources = Hash.new
-    @puppetdb.resources.each do |d|
-      host     = d['certname']
-      title    = d['title']
-      resources[host] = Hash.new if !resources.key?(host)
-      resources[host]['tags'] = Array.new if !resources[host].key?('tags')
-      resources[host]['tags'] << title
-    end
+    # Create a new resources hash which automatically creates new
+    # hash values when a new key is first assigned
+    resources = Hash.new { |k,v| k[v] = {} }
 
-    resources.keys.sort.each do |k|
-      resources[k]['tags'].uniq!
-      resources[k]['tags'] =  resources[k]['tags'].join(",")
-      resources[k]['hostname'] = k
+    @puppetdb.nodes.each do |n|
+      resources[n['name']] ||= {}
     end
 
     @puppetdb.facts.each do |d|
-      host     = d['certname']
-      if d['name'] != "hostname"
-        name  = d['name']
-        value = d['value'] if d['name'] != "hostname"
-        resources[host] = Hash.new if !resources.key?(host)
-        resources[host][name] = Hash.new if !resources[host].key?(name)
-        if ( name == 'serialnumber' )
-          resources[host][name] = 'Serial Number ' + value
-        else
-          resources[host][name] = value
-        end
-      end
+      next if d['name'] == "hostname"
+
+      host  = d['certname']
+      name  = d['name']
+      value = d['value']
+
+      resources[host][name] = value
+
     end
     resources
   end
@@ -123,10 +131,7 @@ rundeck  = Rundeck.new(puppetdb)
 
 set :bind, '0.0.0.0'
 
-before do
-  response["Content-Type"] = "application/yaml"
-end
-
 get '/' do
+  content_type 'application/yaml'
   rundeck.resources.to_yaml
 end
